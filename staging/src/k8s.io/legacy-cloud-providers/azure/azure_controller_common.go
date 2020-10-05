@@ -88,7 +88,9 @@ type controllerCommon struct {
 	resourceGroup         string
 	// store disk URI when disk is in attaching or detaching process
 	diskAttachDetachMap sync.Map
-	// vm disk map used to lock per vm update calls
+	// store LUNs that have been assigned to disks which are in the process of being attached for a given VM
+	lunAttachMap sync.Map
+	// map used to lock per vm and per vm+diskURI update calls
 	vmLockMap *lockMap
 	cloud     *Cloud
 }
@@ -187,15 +189,22 @@ func (c *controllerCommon) AttachDisk(isManagedDisk bool, diskName, diskURI stri
 		return -1, fmt.Errorf("failed to get azure instance id for node %q (%v)", nodeName, err)
 	}
 
-	c.vmLockMap.LockEntry(strings.ToLower(string(nodeName)))
-	defer c.vmLockMap.UnlockEntry(strings.ToLower(string(nodeName)))
+	lockByVm := strings.ToLower(string(nodeName))
 
-	lun, err := c.GetNextDiskLun(nodeName)
+	c.vmLockMap.LockEntry(lockByVm)
+	lun, lunAttachMapIndex, err := c.GetNextDiskLun(nodeName)
+	c.vmLockMap.UnlockEntry(lockByVm)
+	defer c.lunAttachMap.Delete(lunAttachMapIndex)
+
 	if err != nil {
 		klog.Warningf("no LUN available for instance %q (%v)", nodeName, err)
 		return -1, fmt.Errorf("all LUNs are used, cannot attach volume (%s, %s) to instance %q (%v)", diskName, diskURI, instanceid, err)
 	}
 
+	lockByVmAndDisk := lockByVm + "#" + strings.ToLower(diskURI)
+
+	c.vmLockMap.LockEntry(lockByVmAndDisk)
+	defer c.vmLockMap.UnlockEntry(lockByVmAndDisk)
 	klog.V(2).Infof("Trying to attach volume %q lun %d to node %q.", diskURI, lun, nodeName)
 	c.diskAttachDetachMap.Store(strings.ToLower(diskURI), "attaching")
 	defer c.diskAttachDetachMap.Delete(strings.ToLower(diskURI))
@@ -303,13 +312,15 @@ func (c *controllerCommon) GetDiskLun(diskName, diskURI string, nodeName types.N
 	return -1, fmt.Errorf("cannot find Lun for disk %s", diskName)
 }
 
-// GetNextDiskLun searches all vhd attachment on the host and find unused lun. Return -1 if all luns are used.
-func (c *controllerCommon) GetNextDiskLun(nodeName types.NodeName) (int32, error) {
+// GetNextDiskLun searches all vhd attachment on the host and the luns in the process of being used for attachment and find unused lun. Return -1 if all luns are used.
+func (c *controllerCommon) GetNextDiskLun(nodeName types.NodeName) (int32, string, error) {
 	disks, err := c.getNodeDataDisks(nodeName, azcache.CacheReadTypeDefault)
 	if err != nil {
 		klog.Errorf("error of getting data disks for node %q: %v", nodeName, err)
-		return -1, err
+		return -1, "", err
 	}
+
+	lowerNodeName := strings.ToLower(string(nodeName))
 
 	used := make([]bool, maxLUN)
 	for _, disk := range disks {
@@ -319,10 +330,14 @@ func (c *controllerCommon) GetNextDiskLun(nodeName types.NodeName) (int32, error
 	}
 	for k, v := range used {
 		if !v {
-			return int32(k), nil
+			lunAttachMapIndex := lowerNodeName + string(k)
+			_, inProgress := c.lunAttachMap.LoadOrStore(lunAttachMapIndex, "InProgress")
+			if !inProgress {
+				return int32(k), lunAttachMapIndex, nil
+			}
 		}
 	}
-	return -1, fmt.Errorf("all luns are used")
+	return -1, "", fmt.Errorf("all luns are used")
 }
 
 // DisksAreAttached checks if a list of volumes are attached to the node with the specified NodeName.
