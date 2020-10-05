@@ -232,12 +232,14 @@ func (c *controllerCommon) DetachDisk(diskName, diskURI string, nodeName types.N
 
 	klog.V(2).Infof("detach %v from node %q", diskURI, nodeName)
 
+	lockByVmAndDisk := strings.ToLower(string(nodeName)) + "#" + strings.ToLower(diskURI)
+
 	// make the lock here as small as possible
-	c.vmLockMap.LockEntry(strings.ToLower(string(nodeName)))
+	c.vmLockMap.LockEntry(lockByVmAndDisk)
 	c.diskAttachDetachMap.Store(strings.ToLower(diskURI), "detaching")
 	err = vmset.DetachDisk(diskName, diskURI, nodeName)
 	c.diskAttachDetachMap.Delete(strings.ToLower(diskURI))
-	c.vmLockMap.UnlockEntry(strings.ToLower(string(nodeName)))
+	c.vmLockMap.UnlockEntry(lockByVmAndDisk)
 
 	if err != nil {
 		if isInstanceNotFoundError(err) {
@@ -249,11 +251,11 @@ func (c *controllerCommon) DetachDisk(diskName, diskURI string, nodeName types.N
 		if retry.IsErrorRetriable(err) && c.cloud.CloudProviderBackoff {
 			klog.Warningf("azureDisk - update backing off: detach disk(%s, %s), err: %v", diskName, diskURI, err)
 			retryErr := kwait.ExponentialBackoff(c.cloud.RequestBackoff(), func() (bool, error) {
-				c.vmLockMap.LockEntry(strings.ToLower(string(nodeName)))
+				c.vmLockMap.LockEntry(lockByVmAndDisk)
 				c.diskAttachDetachMap.Store(strings.ToLower(diskURI), "detaching")
 				err := vmset.DetachDisk(diskName, diskURI, nodeName)
 				c.diskAttachDetachMap.Delete(strings.ToLower(diskURI))
-				c.vmLockMap.UnlockEntry(strings.ToLower(string(nodeName)))
+				c.vmLockMap.UnlockEntry(lockByVmAndDisk)
 
 				retriable := false
 				if err != nil && retry.IsErrorRetriable(err) {
