@@ -422,7 +422,7 @@ func TestGetNextDiskLun(t *testing.T) {
 			mockVMsClient.EXPECT().Get(gomock.Any(), testCloud.ResourceGroup, *vm.Name, gomock.Any()).Return(vm, nil).AnyTimes()
 		}
 
-		lun, err := common.GetNextDiskLun("vm1")
+		lun, _, err := common.GetNextDiskLun("vm1")
 		assert.Equal(t, test.expectedLun, lun, "TestCase[%d]: %s", i, test.desc)
 		assert.Equal(t, test.expectedErr, err != nil, "TestCase[%d]: %s", i, test.desc)
 	}
